@@ -424,7 +424,9 @@ let faceDetector = null;
 let faceDetectorType = null; // 'native' | 'color'
 let lastSwitchTime = 0;
 let _prevFaceVisible = false;
-let _faceDisappearedAt = 0;
+let _baseFaceArea = 0;      // 近期最大脸部面积（基准）
+let _baseFaceUpdateAt = 0;  // 上次更新基准的时间
+let _occludeTriggered = false; // 是否已因遮挡触发过切换（需等脸恢复后才能再次触发）
 let _detectFrame = 0; // 节流：跳帧检测降低负载
 let _lastVideoTime = -1;
 
@@ -789,14 +791,42 @@ function detectSkinRegion() {
 function checkOcclusion(detection) {
   const now = Date.now();
   if (now - lastSwitchTime < 2000) return;
-  const faceVisible = !!detection;
-  if (_prevFaceVisible && !faceVisible) {
-    _faceDisappearedAt = now;
+
+  if (!detection) {
+    // 脸完全消失：重置遮挡触发标记，等待脸重新出现
+    _occludeTriggered = false;
+    _prevFaceVisible = false;
+    return;
   }
-  if (!_prevFaceVisible && faceVisible) {
-    triggerAutoSwitch();
+
+  const area = detection.width * detection.height;
+
+  // 更新基准面积：每 3 秒重新校准一次，取近期最大值
+  if (area > _baseFaceArea || now - _baseFaceUpdateAt > 3000) {
+    if (area > _baseFaceArea) {
+      _baseFaceArea = area;
+      _baseFaceUpdateAt = now;
+    } else if (now - _baseFaceUpdateAt > 3000) {
+      // 超时重置，用当前面积重新校准
+      _baseFaceArea = area;
+      _baseFaceUpdateAt = now;
+    }
   }
-  _prevFaceVisible = faceVisible;
+
+  // 需要基准稳定（>0）才能做比较
+  if (_baseFaceArea > 0) {
+    const ratio = area / _baseFaceArea;
+    if (ratio < 0.67 && !_occludeTriggered) {
+      // 面积 < 基准的 2/3，即超过 1/3 被遮挡 → 切换
+      _occludeTriggered = true;
+      triggerAutoSwitch();
+    } else if (ratio >= 0.85) {
+      // 脸恢复大部分，重置标记允许下次遮挡再触发
+      _occludeTriggered = false;
+    }
+  }
+
+  _prevFaceVisible = true;
 }
 
 // ========== 绘制主循环 ==========
