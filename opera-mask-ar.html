@@ -905,7 +905,9 @@ function drawFullMask(ctx, cx, cy, fw, fh, type) {
   }
   // 居中：水平居中，垂直中心略上移一点点让下巴完整露出
   const dx = cx - drawW / 2;
-  const dy = cy - drawH * 0.5 + fh * 0.05;
+  // 生（sheng）面具额外向上偏移 8% 脸高
+  const vertOffset = (type === 'sheng') ? -drawH * 0.08 : 0;
+  const dy = cy - drawH * 0.5 + fh * 0.05 + vertOffset;
   ctx.save();
   ctx.drawImage(img, dx, dy, drawW, drawH);
   ctx.restore();
