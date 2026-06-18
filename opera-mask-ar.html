@@ -215,6 +215,13 @@
     .cam-section,.info-section{max-width:100%}
   }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "@mediapipe/tasks-vision": "https://unpkg.com/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs"
+  }
+}
+</script>
 </head>
 <body>
 
@@ -422,14 +429,48 @@ function setStatus(text, cls) {
   el.textContent = text;
 }
 
+// ========== MediaPipe FaceDetector（优先方案） ==========
+let _mpFaceDetector = null;
+const _mpWasmPath = 'https://unpkg.com/@mediapipe/tasks-vision@0.10.14/wasm';
+
+async function tryInitMediaPipe() {
+  try {
+    setStatus('⏳ 加载 MediaPipe...', 'busy');
+    const { FaceDetector, FilesetResolver } = await import('@mediapipe/tasks-vision');
+    const vision = await FilesetResolver.forVisionTasks(_mpWasmPath);
+    _mpFaceDetector = await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+        delegate: 'GPU'
+      },
+      minDetectionConfidence: 0.5,
+      minSuppressionThreshold: 0.3,
+      runningMode: 'VIDEO'
+    });
+    faceDetectorType = 'mediapipe';
+    faceDetector = _mpFaceDetector;
+    setStatus('✓ MediaPipe 就绪', 'ok');
+    onDetectorReady();
+    console.log('[MP] FaceDetector ready');
+    return true;
+  } catch (e) {
+    console.warn('[MP] init failed:', e.message);
+    _mpFaceDetector = null;
+    return false;
+  }
+}
+
 // ========== 人脸检测器：三层 fallback ==========
 async function initFaceDetector() {
   setStatus('⏳ 加载检测引擎...', 'busy');
 
-  // 第 1 方案：浏览器原生 FaceDetector API（Chrome / Edge 需开启 flag）
+  // 第 1 方案：MediaPipe FaceDetector（最准，需网络加载模型）
+  if (await tryInitMediaPipe()) return true;
+
+  // 第 2 方案：浏览器原生 FaceDetector API（Chrome / Edge 需开启 flag）
   if (await tryInitNative()) return true;
 
-  // 第 2 方案：强化肤色追踪（保底，零外部依赖）
+  // 第 3 方案：强化肤色追踪（保底，零外部依赖）
   if (await tryInitColorTracker()) return true;
 
   setStatus('✗ 全部检测方案失败', 'err');
@@ -473,7 +514,8 @@ function onDetectorReady() {
   if (hint) hint.classList.add('show');
   const dbg = document.getElementById('faceDebug');
   if (dbg) dbg.style.display = 'flex';
-  showToast('检测引擎就绪：' + faceDetectorType);
+  const _engineNames = { mediapipe: '🎯 MediaPipe（高精度）', native: '⚡ 原生API', color: '🎨 肤色追踪（保底）' };
+  showToast('检测引擎就绪：' + (_engineNames[faceDetectorType] || faceDetectorType));
 }
 
 // ========== 摄像头控制 ==========
@@ -596,6 +638,23 @@ async function detectFace() {
   if (faceDetectorType !== 'color' && _detectFrame % 3 !== 0) return _lastDetectedBox;
 
   try {
+    if (faceDetectorType === 'mediapipe') {
+      // MediaPipe detectForVideo 需要单调递增时间戳（ms）
+      const ts = performance.now();
+      const result = _mpFaceDetector.detectForVideo(video, ts);
+      if (result && result.detections && result.detections.length > 0) {
+        const bb = result.detections[0].boundingBox;
+        _lastDetectedBox = {
+          originX: bb.originX,
+          originY: bb.originY,
+          width: bb.width,
+          height: bb.height
+        };
+        return _lastDetectedBox;
+      }
+      _lastDetectedBox = null;
+      return null;
+    }
     if (faceDetectorType === 'native') {
       const faces = await faceDetector.detect(video);
       if (faces && faces.length > 0) {
