@@ -91,6 +91,18 @@
   .face-debug.lost .debug-dot{background:#ef4444}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
 
+  /* 静音按钮 */
+  .mute-btn{
+    position:absolute;bottom:14px;right:14px;
+    background:rgba(0,0,0,0.6);backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,0.2);
+    color:#fff;width:36px;height:36px;border-radius:50%;
+    font-size:16px;cursor:pointer;z-index:10;
+    display:flex;align-items:center;justify-content:center;
+    transition:background 0.2s;
+  }
+  .mute-btn:hover{background:rgba(255,255,255,0.2)}
+
   /* 底部控制条 */
   .controls{
     display:flex;gap:8px;flex-wrap:wrap;justify-content:center;
@@ -252,6 +264,8 @@
         <div class="debug-dot"></div>
         <span id="debugText">检测中...</span>
       </div>
+      <!-- 静音按钮 -->
+      <button class="mute-btn" id="muteBtn" onclick="toggleMute()" title="静音/开音">🔊</button>
     </div>
     <div class="controls">
       <button class="btn" id="btnCam" onclick="toggleCam()">
@@ -984,6 +998,7 @@ function switchMask(type, auto) {
   } else {
     showToast('变脸！现在是「' + data.name + '」角');
   }
+  playMaskMusic(type);
 }
 
 function triggerAutoSwitch() {
@@ -1047,8 +1062,315 @@ function downloadSnap() {
 }
 
 // ========== 辅助 ==========
+// ========== 戏曲配乐系统（Web Audio API 合成）==========
+let _audioCtx = null;
+let _masterGain = null;
+let _isMuted = false;
+let _currentMusicStop = null; // 当前音乐的停止函数
+
+// 确保 AudioContext 已初始化（需用户手势触发）
+function ensureAudio() {
+  if (_audioCtx) return true;
+  try {
+    _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    _masterGain = _audioCtx.createGain();
+    _masterGain.gain.value = 0.55;
+    _masterGain.connect(_audioCtx.destination);
+    return true;
+  } catch(e) { return false; }
+}
+
+// 静音切换
+function toggleMute() {
+  if (!ensureAudio()) return;
+  _isMuted = !_isMuted;
+  _masterGain.gain.setTargetAtTime(_isMuted ? 0 : 0.55, _audioCtx.currentTime, 0.1);
+  document.getElementById('muteBtn').textContent = _isMuted ? '🔇' : '🔊';
+}
+
+// 工具：创建振荡器节点
+function makeOsc(type, freq, gainVal, startT, endT, detune) {
+  const osc = _audioCtx.createOscillator();
+  const g = _audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  if (detune) osc.detune.value = detune;
+  g.gain.value = gainVal;
+  osc.connect(g);
+  g.connect(_masterGain);
+  osc.start(startT);
+  osc.stop(endT);
+  return { osc, gain: g };
+}
+
+// 工具：创建噪音冲击（模拟锣鼓）
+function makePercussion(freq, decay, startT, gainVal) {
+  const buf = _audioCtx.createBuffer(1, _audioCtx.sampleRate * decay, _audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 3);
+  }
+  const src = _audioCtx.createBufferSource();
+  src.buffer = buf;
+  const filter = _audioCtx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.value = freq;
+  filter.Q.value = 8;
+  const g = _audioCtx.createGain();
+  g.gain.value = gainVal;
+  src.connect(filter);
+  filter.connect(g);
+  g.connect(_masterGain);
+  src.start(startT);
+  return src;
+}
+
+// 工具：淡出并停止所有节点
+function fadeOutNodes(nodes, duration) {
+  const t = _audioCtx.currentTime;
+  nodes.forEach(n => {
+    if (n && n.gain) {
+      n.gain.gain.setTargetAtTime(0, t, duration / 4);
+      try { n.osc && n.osc.stop(t + duration); } catch(e) {}
+    }
+    if (n && n.stop) {
+      try { n.stop(t + duration); } catch(e) {}
+    }
+  });
+}
+
+// ── 生：古筝风格 · 五声音阶悠扬旋律 ──
+function playSheng() {
+  if (!ensureAudio()) return () => {};
+  // 五声音阶：D E F# A B （对应 293 329 370 440 494 Hz）
+  const scale = [293.7, 329.6, 370, 440, 493.9, 587.3];
+  const melody = [0,2,4,3,1,2,0,4,3,1,2,4]; // 音阶索引序列
+  const nodes = [];
+  const loopDur = 3.2;
+  let stopFlag = false;
+
+  function playLoop(startT) {
+    if (stopFlag) return;
+    melody.forEach((idx, i) => {
+      const t = startT + i * (loopDur / melody.length);
+      const dur = loopDur / melody.length * 0.7;
+      const freq = scale[idx];
+      // 主音
+      const g = _audioCtx.createGain();
+      const osc = _audioCtx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.18, t + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.connect(g); g.connect(_masterGain);
+      osc.start(t); osc.stop(t + dur + 0.1);
+      nodes.push({ osc, gain: g });
+      // 泛音（高八度轻音）
+      const g2 = _audioCtx.createGain();
+      const osc2 = _audioCtx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = freq * 2;
+      g2.gain.setValueAtTime(0, t);
+      g2.gain.linearRampToValueAtTime(0.05, t + 0.03);
+      g2.gain.exponentialRampToValueAtTime(0.001, t + dur * 0.6);
+      osc2.connect(g2); g2.connect(_masterGain);
+      osc2.start(t); osc2.stop(t + dur);
+      nodes.push({ osc: osc2, gain: g2 });
+    });
+    // 下一循环
+    const nextT = startT + loopDur;
+    const delay = (nextT - _audioCtx.currentTime) * 1000 - 100;
+    setTimeout(() => playLoop(nextT), Math.max(delay, 0));
+  }
+  playLoop(_audioCtx.currentTime + 0.1);
+  return () => { stopFlag = true; fadeOutNodes(nodes, 0.5); };
+}
+
+// ── 旦：笛子风格 · 婉转连绵 ──
+function playDan() {
+  if (!ensureAudio()) return () => {};
+  const scale = [523.3, 587.3, 659.3, 784, 880, 1046.5];
+  const melody = [0,1,2,3,2,1,4,3,2,0,1,2];
+  const nodes = [];
+  let stopFlag = false;
+
+  function playLoop(startT) {
+    if (stopFlag) return;
+    melody.forEach((idx, i) => {
+      const t = startT + i * (3.6 / melody.length);
+      const dur = 3.6 / melody.length * 0.85;
+      const freq = scale[idx];
+      const g = _audioCtx.createGain();
+      const osc = _audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq * 0.98, t);
+      osc.frequency.linearRampToValueAtTime(freq, t + 0.08); // 上滑音
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.22, t + 0.06);
+      g.gain.setValueAtTime(0.22, t + dur - 0.1);
+      g.gain.linearRampToValueAtTime(0, t + dur);
+      osc.connect(g); g.connect(_masterGain);
+      osc.start(t); osc.stop(t + dur + 0.05);
+      nodes.push({ osc, gain: g });
+      // 颤音效果（轻微 LFO 模拟）
+      if (i % 3 === 0) {
+        const lfo = _audioCtx.createOscillator();
+        const lfoGain = _audioCtx.createGain();
+        lfo.frequency.value = 5.5;
+        lfoGain.gain.value = 8;
+        lfo.connect(lfoGain);
+        lfoGain.connect(osc.frequency);
+        lfo.start(t + 0.1); lfo.stop(t + dur);
+        nodes.push({ osc: lfo, gain: lfoGain });
+      }
+    });
+    const nextT = startT + 3.6;
+    setTimeout(() => playLoop(nextT), Math.max((nextT - _audioCtx.currentTime) * 1000 - 100, 0));
+  }
+  playLoop(_audioCtx.currentTime + 0.1);
+  return () => { stopFlag = true; fadeOutNodes(nodes, 0.5); };
+}
+
+// ── 净：铜锣 + 大鼓 · 激昂威武 ──
+function playJing() {
+  if (!ensureAudio()) return () => {};
+  const nodes = [];
+  let stopFlag = false;
+
+  function playLoop(startT) {
+    if (stopFlag) return;
+    const pattern = [0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8]; // 节拍点
+    pattern.forEach((offset, i) => {
+      const t = startT + offset;
+      // 锣声（低频衰减正弦）
+      if (i % 4 === 0) {
+        const g = _audioCtx.createGain();
+        const osc = _audioCtx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(120, t);
+        osc.frequency.exponentialRampToValueAtTime(60, t + 1.2);
+        g.gain.setValueAtTime(0.35, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+        osc.connect(g); g.connect(_masterGain);
+        osc.start(t); osc.stop(t + 1.3);
+        nodes.push({ osc, gain: g });
+      }
+      // 鼓声（噪音）
+      const perc = makePercussion(200, 0.25, t, i % 2 === 0 ? 0.4 : 0.2);
+      nodes.push(perc);
+      // 镲片（高频噪音）
+      if (i % 2 === 1) {
+        const perc2 = makePercussion(4000, 0.1, t, 0.15);
+        nodes.push(perc2);
+      }
+    });
+    const loopDur = 3.2;
+    setTimeout(() => playLoop(startT + loopDur), Math.max((startT + loopDur - _audioCtx.currentTime) * 1000 - 100, 0));
+  }
+  playLoop(_audioCtx.currentTime + 0.05);
+  return () => { stopFlag = true; };
+}
+
+// ── 末：二胡风格 · 苍劲低沉 ──
+function playMo() {
+  if (!ensureAudio()) return () => {};
+  const scale = [196, 220, 246.9, 293.7, 329.6, 392];
+  const melody = [2,1,0,1,2,3,4,3,2,1,0,2];
+  const nodes = [];
+  let stopFlag = false;
+
+  function playLoop(startT) {
+    if (stopFlag) return;
+    melody.forEach((idx, i) => {
+      const t = startT + i * (4.0 / melody.length);
+      const dur = 4.0 / melody.length * 0.9;
+      const freq = scale[idx];
+      // 二胡锯齿波（带谐波）
+      const g = _audioCtx.createGain();
+      const osc = _audioCtx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = freq;
+      const filter = _audioCtx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 800;
+      filter.Q.value = 2;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.14, t + 0.12);
+      g.gain.setValueAtTime(0.14, t + dur - 0.15);
+      g.gain.linearRampToValueAtTime(0, t + dur);
+      osc.connect(filter); filter.connect(g); g.connect(_masterGain);
+      osc.start(t); osc.stop(t + dur + 0.1);
+      nodes.push({ osc, gain: g });
+    });
+    const loopDur = 4.0;
+    setTimeout(() => playLoop(startT + loopDur), Math.max((startT + loopDur - _audioCtx.currentTime) * 1000 - 100, 0));
+  }
+  playLoop(_audioCtx.currentTime + 0.1);
+  return () => { stopFlag = true; fadeOutNodes(nodes, 0.6); };
+}
+
+// ── 丑：欢快锣鼓 · 俏皮跳跃 ──
+function playChou() {
+  if (!ensureAudio()) return () => {};
+  const nodes = [];
+  let stopFlag = false;
+  const scale = [523.3, 659.3, 784, 1046.5];
+
+  function playLoop(startT) {
+    if (stopFlag) return;
+    // 欢快节拍（8分音符）
+    for (let i = 0; i < 16; i++) {
+      const t = startT + i * 0.18;
+      // 小鼓
+      const perc = makePercussion(800, 0.12, t, i % 4 === 0 ? 0.3 : 0.15);
+      nodes.push(perc);
+      // 小镲
+      if (i % 2 === 1) {
+        const perc2 = makePercussion(6000, 0.06, t, 0.1);
+        nodes.push(perc2);
+      }
+      // 跳跃旋律音
+      if (i % 4 === 0) {
+        const freq = scale[Math.floor(i / 4) % scale.length];
+        const g = _audioCtx.createGain();
+        const osc = _audioCtx.createOscillator();
+        osc.type = 'square';
+        osc.frequency.value = freq;
+        osc.detune.value = (Math.random() - 0.5) * 10;
+        g.gain.setValueAtTime(0.1, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+        osc.connect(g); g.connect(_masterGain);
+        osc.start(t); osc.stop(t + 0.18);
+        nodes.push({ osc, gain: g });
+      }
+    }
+    const loopDur = 2.88;
+    setTimeout(() => playLoop(startT + loopDur), Math.max((startT + loopDur - _audioCtx.currentTime) * 1000 - 100, 0));
+  }
+  playLoop(_audioCtx.currentTime + 0.05);
+  return () => { stopFlag = true; };
+}
+
+// 音乐播放器：按脸谱类型播放对应音乐
+const _maskMusic = { sheng: playSheng, dan: playDan, jing: playJing, mo: playMo, chou: playChou };
+
+function playMaskMusic(type) {
+  if (!ensureAudio()) return;
+  // 停止当前音乐（淡出）
+  if (_currentMusicStop) {
+    try { _currentMusicStop(); } catch(e) {}
+    _currentMusicStop = null;
+  }
+  // 短暂延迟后启动新音乐（让淡出先进行）
+  setTimeout(() => {
+    if (_maskMusic[type]) {
+      _currentMusicStop = _maskMusic[type]();
+    }
+  }, 300);
+}
+
 function showToast(msg) {
-  const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(t._timer);
